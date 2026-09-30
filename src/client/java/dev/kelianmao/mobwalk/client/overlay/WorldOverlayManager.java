@@ -9,18 +9,18 @@ import java.util.OptionalDouble;
 
 import dev.kelianmao.mobwalk.MobWalk;
 
-import com.mojang.blaze3d.IndexType;
-import com.mojang.blaze3d.PrimitiveTopology;
-import com.mojang.blaze3d.buffers.GpuBuffer;
-import com.mojang.blaze3d.buffers.GpuBufferSlice;
-import com.mojang.blaze3d.pipeline.RenderPipeline;
-import com.mojang.blaze3d.systems.RenderPass;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vertex.BufferBuilder;
 import com.mojang.blaze3d.vertex.ByteBufferBuilder;
 import com.mojang.blaze3d.vertex.MeshData;
 import com.mojang.blaze3d.vertex.PoseStack;
-import com.mojang.blaze3d.vertex.VertexFormat;
+import com.mojang.renderpearl.api.buffers.GpuBuffer;
+import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
+import com.mojang.renderpearl.api.commands.RenderPass;
+import com.mojang.renderpearl.api.pipeline.IndexType;
+import com.mojang.renderpearl.api.pipeline.PrimitiveTopology;
+import com.mojang.renderpearl.api.pipeline.RenderPipeline;
+import com.mojang.renderpearl.api.vertex.VertexFormat;
 import org.joml.Matrix4f;
 import org.joml.Matrix4fc;
 import org.joml.Vector3f;
@@ -37,6 +37,7 @@ import net.minecraft.world.phys.Vec3;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.rendering.v1.level.LevelExtractionContext;
+import net.fabricmc.fabric.api.client.rendering.v1.level.LevelExtractionEvents;
 import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderContext;
 import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderEvents;
 
@@ -97,13 +98,14 @@ public final class WorldOverlayManager {
     collisionSurface = new CollisionSurfaceOverlay();
     register(collisionSurface);
 
-    LevelRenderEvents.END_EXTRACTION.register(WorldOverlayManager::extract);
-    // Draw AFTER translucent terrain so ice/glass/honey are already in the
-    // color buffer and our half-alpha fill composites on top (full authored
-    // alpha). Depth-tested SKIRT then fails against water's written depth, so
-    // pond bottoms need crouch (depth-off FILLED) to show through — preferred
-    // over BEFORE (ice overdraws the fill) or dual-phase (2× draw, too faint).
-    LevelRenderEvents.AFTER_TRANSLUCENT_TERRAIN.register(WorldOverlayManager::draw);
+    LevelExtractionEvents.END_EXTRACTION.register(WorldOverlayManager::extract);
+    // Draw at END_MAIN, after vanilla closes its main render pass: the 26.3
+    // command encoder allows one open pass, and the translucent-terrain
+    // callbacks run inside vanilla's. Ice/glass/honey (classic or Improved
+    // Transparency) are already in the color buffer, so our half-alpha fill
+    // composites on top. Depth-tested SKIRT fails against water's written
+    // depth, so pond bottoms need crouch (depth-off FILLED) to show through.
+    LevelRenderEvents.END_MAIN.register(WorldOverlayManager::draw);
     // Free GPU resources at shutdown. We use CLIENT_STOPPING rather than a
     // GameRenderer#close mixin to avoid mixin plumbing; trade-off: buffers
     // are freed at shutdown, not on a mid-session renderer reload.
@@ -172,29 +174,110 @@ public final class WorldOverlayManager {
 
     // Fill (depth-off tops) → skirts (depth-tested) → beams (depth-off, last):
     // beams composite over skirts so opaque hole beams are not overdrawn.
+    // One RenderPass for every layer: 26.3's command encoder rejects
+    // createRenderPass while a pass is still open.
     Minecraft client = Minecraft.getInstance();
-    drawLayer(client, fillLayer);
-    drawLayer(client, skirtLayer);
-    drawLayer(client, beamLayer);
+    Batch fillBatch = null;
+    Batch skirtBatch = null;
+    Batch beamBatch = null;
+    // Ring-buffer rotate() creates a fence, which the encoder rejects while any
+    // pass is open, so cleanup rotates only once our pass has closed.
+    boolean passClosed = true;
+    try {
+      fillBatch = prepare(fillLayer);
+      skirtBatch = prepare(skirtLayer);
+      beamBatch = prepare(beamLayer);
+      if (fillBatch == null && skirtBatch == null && beamBatch == null) {
+        return;
+      }
+
+      // Snapshot the model-view instead of passing the live shared Matrix4fStack:
+      // the dynamic-transform write must not entangle our world pass with vanilla's
+      // singleton stack, or later first-person screen overlays (fire, etc.) inherit
+      // our camera transform and render world-anchored instead of on the screen.
+      Matrix4f modelView = new Matrix4f(RenderSystem.getModelViewStack());
+      GpuBufferSlice dynamicTransforms = RenderSystem.getDynamicUniforms()
+        .writeTransform(modelView, COLOR_MODULATOR, MODEL_OFFSET, TEXTURE_MATRIX);
+      passClosed = false;
+      try (RenderPass renderPass = RenderSystem.getDevice()
+          .createCommandEncoder()
+          .createRenderPass(
+            () -> MobWalk.MOD_ID + " world overlay rendering",
+            client.gameRenderer.mainRenderTarget().getColorTextureView(), Optional.empty(),
+            client.gameRenderer.mainRenderTarget().getDepthTextureView(), OptionalDouble.empty())) {
+        drawBatch(renderPass, fillBatch, dynamicTransforms);
+        drawBatch(renderPass, skirtBatch, dynamicTransforms);
+        drawBatch(renderPass, beamBatch, dynamicTransforms);
+      }
+      passClosed = true;
+    } finally {
+      closeBatch(fillBatch, passClosed);
+      closeBatch(skirtBatch, passClosed);
+      closeBatch(beamBatch, passClosed);
+    }
   }
 
-  private static void drawLayer(Minecraft client, Layer layer) {
-    // build() returns null when nothing was emitted into this layer's buffer;
-    // reset the builder regardless so next frame starts fresh.
+  // build() returns null when nothing was emitted into this layer's buffer;
+  // reset the builder regardless so next frame starts fresh.
+  private static Batch prepare(Layer layer) {
     MeshData builtBuffer = layer.buffer.build();
     layer.buffer = null;
     if (builtBuffer == null) {
-      return;
+      return null;
     }
 
     MeshData.DrawState drawParameters = builtBuffer.drawState();
     VertexFormat format = drawParameters.format();
-
     GpuBuffer vertices = upload(layer, drawParameters, format, builtBuffer);
 
-    execute(client, layer, builtBuffer, drawParameters, vertices, format);
+    GpuBuffer indices;
+    IndexType indexType;
+    boolean closeIndices = false;
+    RenderPipeline pipeline = layer.pipeline;
+    if (pipeline.getPrimitiveTopology() == PrimitiveTopology.QUADS) {
+      builtBuffer.sortQuads(layer.allocator, RenderSystem.getProjectionType().vertexSorting());
+      indices = RenderSystem.getDevice().createBuffer(
+        () -> MobWalk.MOD_ID + " world overlay indices",
+        GpuBuffer.USAGE_INDEX,
+        builtBuffer.indexBuffer()
+      );
+      closeIndices = true;
+      indexType = builtBuffer.drawState().indexType();
+    } else {
+      RenderSystem.AutoStorageIndexBuffer shapeIndexBuffer = RenderSystem.getSequentialBuffer(pipeline.getPrimitiveTopology());
+      indices = shapeIndexBuffer.getBuffer(drawParameters.indexCount());
+      indexType = shapeIndexBuffer.type();
+    }
 
-    layer.vertexBuffer.rotate();
+    return new Batch(layer, builtBuffer, drawParameters, vertices, indices, indexType, closeIndices);
+  }
+
+  private static void drawBatch(RenderPass renderPass, Batch batch, GpuBufferSlice dynamicTransforms) {
+    if (batch == null) {
+      return;
+    }
+    renderPass.setPipeline(RenderSystem.getCompiledPipeline(batch.layer.pipeline));
+    RenderSystem.bindDefaultUniforms(renderPass);
+    renderPass.setUniform("DynamicTransforms", dynamicTransforms);
+    renderPass.setVertexBuffer(0, batch.vertices.slice());
+    renderPass.setIndexBuffer(batch.indices, batch.indexType);
+    renderPass.drawIndexed(batch.drawParameters.indexCount(), 1, 0, 0, 0);
+  }
+
+  // Skipping rotate() after a failed draw reuses the current ring slot next
+  // frame; that only costs a fence wait, and it keeps cleanup from throwing
+  // over the original exception.
+  private static void closeBatch(Batch batch, boolean rotate) {
+    if (batch == null) {
+      return;
+    }
+    if (batch.closeIndices) {
+      batch.indices.close();
+    }
+    batch.builtBuffer.close();
+    if (rotate) {
+      batch.layer.vertexBuffer.rotate();
+    }
   }
 
   private static GpuBuffer upload(Layer layer, MeshData.DrawState drawParameters, VertexFormat format, MeshData builtBuffer) {
@@ -221,59 +304,6 @@ public final class WorldOverlayManager {
     return layer.vertexBuffer.currentBuffer();
   }
 
-  private static void execute(Minecraft client, Layer layer, MeshData builtBuffer,
-      MeshData.DrawState drawParameters, GpuBuffer vertices, VertexFormat format) {
-    RenderPipeline pipeline = layer.pipeline;
-    GpuBuffer indices;
-    IndexType indexType;
-    boolean closeIndices = false;
-
-    if (pipeline.getPrimitiveTopology() == PrimitiveTopology.QUADS) {
-      builtBuffer.sortQuads(layer.allocator, RenderSystem.getProjectionType().vertexSorting());
-      indices = RenderSystem.getDevice().createBuffer(
-        () -> MobWalk.MOD_ID + " world overlay indices",
-        GpuBuffer.USAGE_INDEX,
-        builtBuffer.indexBuffer()
-      );
-      closeIndices = true;
-      indexType = builtBuffer.drawState().indexType();
-    } else {
-      RenderSystem.AutoStorageIndexBuffer shapeIndexBuffer = RenderSystem.getSequentialBuffer(pipeline.getPrimitiveTopology());
-      indices = shapeIndexBuffer.getBuffer(drawParameters.indexCount());
-      indexType = shapeIndexBuffer.type();
-    }
-
-    // Snapshot the model-view instead of passing the live shared Matrix4fStack:
-    // the dynamic-transform write must not entangle our world pass with vanilla's
-    // singleton stack, or later first-person screen overlays (fire, etc.) inherit
-    // our camera transform and render world-anchored instead of on the screen.
-    Matrix4f modelView = new Matrix4f(RenderSystem.getModelViewStack());
-    GpuBufferSlice dynamicTransforms = RenderSystem.getDynamicUniforms()
-      .writeTransform(modelView, COLOR_MODULATOR, MODEL_OFFSET, TEXTURE_MATRIX);
-    try (RenderPass renderPass = RenderSystem.getDevice()
-        .createCommandEncoder()
-        .createRenderPass(
-          () -> MobWalk.MOD_ID + " world overlay rendering",
-          client.gameRenderer.mainRenderTarget().getColorTextureView(), Optional.empty(),
-          client.gameRenderer.mainRenderTarget().getDepthTextureView(), OptionalDouble.empty())) {
-      renderPass.setPipeline(pipeline);
-
-      RenderSystem.bindDefaultUniforms(renderPass);
-      renderPass.setUniform("DynamicTransforms", dynamicTransforms);
-
-      renderPass.setVertexBuffer(0, vertices.slice());
-      renderPass.setIndexBuffer(indices, indexType);
-
-      renderPass.drawIndexed(drawParameters.indexCount(), 1, 0, 0, 0);
-    } finally {
-      if (closeIndices) {
-        indices.close();
-      }
-    }
-
-    builtBuffer.close();
-  }
-
   private static void close() {
     fillLayer.close();
     skirtLayer.close();
@@ -282,7 +312,7 @@ public final class WorldOverlayManager {
 
   // A single GPU draw layer: its pipeline, a private vertex allocator/builder,
   // and a ring buffer sized to its largest batch. The builder is rebuilt each
-  // frame (see drawLayer); the allocator and ring buffer are reused.
+  // frame (see prepare); the allocator and ring buffer are reused.
   private static final class Layer {
     final RenderPipeline pipeline;
     final ByteBufferBuilder allocator = new ByteBufferBuilder(RenderType.SMALL_BUFFER_SIZE);
@@ -306,6 +336,28 @@ public final class WorldOverlayManager {
         vertexBuffer.close();
         vertexBuffer = null;
       }
+    }
+  }
+
+  // One layer's uploaded geometry for the shared render pass.
+  private static final class Batch {
+    final Layer layer;
+    final MeshData builtBuffer;
+    final MeshData.DrawState drawParameters;
+    final GpuBuffer vertices;
+    final GpuBuffer indices;
+    final IndexType indexType;
+    final boolean closeIndices;
+
+    Batch(Layer layer, MeshData builtBuffer, MeshData.DrawState drawParameters, GpuBuffer vertices,
+        GpuBuffer indices, IndexType indexType, boolean closeIndices) {
+      this.layer = layer;
+      this.builtBuffer = builtBuffer;
+      this.drawParameters = drawParameters;
+      this.vertices = vertices;
+      this.indices = indices;
+      this.indexType = indexType;
+      this.closeIndices = closeIndices;
     }
   }
 }

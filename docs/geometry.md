@@ -81,8 +81,8 @@ Today the surface class is `(hazardPriority, visualTopY)`, ordered by
 overlap from a benign class in the same radius tier, then visual height orders
 otherwise equal hazard classes. Water and lava arrive as `HazardClass` values from
 vanilla fluid tags at world read; soul sand and magma stamp from solid block
-identity (`WorldGeometry.solidHazardClass`). The priority-partition algorithm and
-the durable invariants stay unchanged.
+identity (`WorldGeometry.solidHazardClass`). Hazard classes go through the same
+priority-partition algorithm and durable invariants as every other class.
 
 **Aggregate metadata.** Exact `depth` is traversal metadata rather than an ownership
 axis. An inner winner's depth aggregates by minimum over every covering inner node,
@@ -104,11 +104,11 @@ defined by four rules:
    over the top (reaches down to/below the surface, `yMin <= T` — a box resting
    directly on the top has `yMin == T`, a box straddling it has `yMin < T`) **or**
    floats within the entity's **standing column** as a headroom ceiling
-   (`yMin < T+H`, `H = profile.height()`). The buried term is the `H = 0` base case —
-   exactly the old `minY <= T < maxY` test — so a box directly on the surface still
-   buries the top and **embedded/stacked tops are removed**; without it (`yMin < T+H`
+   (`yMin < T+H`, `H = profile.height()`). The buried term is the `H = 0` base case
+   (`minY <= T < maxY`), so a box directly on the surface buries the top and
+   **embedded/stacked tops are removed**; without it (`yMin < T+H`
    alone) a directly-on-top box at `H = 0` would have `yMin == T` ≮ `T`, so every
-   embedded top would leak. **Point is therefore unchanged.** The `yMax > T` bound is
+   embedded top would leak. **Point (`H = 0`) uses the buried term alone.** The `yMax > T` bound is
    strict so the box being stood on never self-occludes, and a ceiling bottom exactly
    at `T+H` (`H > 0`) is just-enough clearance (neither term fires). The covering
    box's own top is itself a (higher) standable surface, so one rule both removes the
@@ -139,8 +139,8 @@ defined by four rules:
    already-reached surface by **one geometric adjacency rule**: the footprints share an
    edge with positive overlap (or overlap with positive area), `footprintAdjacent`,
    **and** `ClimbRule.climbs` — the lower of the two can climb to the higher, one
-   undirected edge (see [Reachability model](#reachability-model)). This subsumes the old
-   same-block / own-column / neighbour-column special cases: a glass pane on a block
+   undirected edge (see [Reachability model](#reachability-model)). This one rule covers
+   same-block, own-column, and neighbour-column connections: a glass pane on a block
    connects to that block's exposed ring because their footprints abut at the hole
    edges — no special case. Only exposed tops are painted; a fully occluded click
    cell (e.g. Ravager on soul sand beside full blocks) stays unpainted while its
@@ -148,8 +148,8 @@ defined by four rules:
 
 **Radius is a BFS depth limit** (max hop-count from the click origin), not a spatial X/Z
 window: horizontal reach is unbounded; termination comes from the hop-count cap plus
-a Y band of about `oy ± radius`. Connectivity gating is unchanged (a drop `> reach`
-or a disconnected patch is never reached). A fully occluded click spends one hop
+a Y band of about `oy ± radius`. Connectivity gates reach on top of that (a drop
+`> reach` or a disconnected patch is never reached). A fully occluded click spends one hop
 entering the exposed graph, so its frontier sits one layer closer than a click on
 an exposed surface at the same radius.
 
@@ -330,7 +330,8 @@ a pure undilated core.
 
 - **World read.** `WorldGeometry.solidHazardClass` stamps `SOUL_SAND` /
   `MAGMA` on solid collision `WorldBox`es from `Blocks.SOUL_SAND` /
-  `Blocks.MAGMA_BLOCK`. Collision, outline, and `occludes=true` are unchanged.
+  `Blocks.MAGMA_BLOCK`. Collision, outline, and `occludes=true` are those of any
+  other solid box.
   Priorities: `SOUL_SAND(3)`, `MAGMA(4)`; `isFluid()` stays false; climb ignores them.
 - **Expose then coplanar-rival punch.** `exposeBox` dilates and occludes as for any
   solid top. For each post-occlusion piece `E` of a solid-hazard target, each
@@ -437,7 +438,7 @@ milestones).
   ceilings/overhangs in the standing column `(T, T+H]` are exposed before
   `exposeBox` runs (not just the box's own buried shell); `H = 0` collapses it back
   to `floor(yMax)±1`. `exposeBox` is memoized per box (and `H` is fixed per
-  `select`, so the memo key is unchanged). A `BitSet` per column records
+  `select`, so the box alone is the memo key). A `BitSet` per column records
   scanned rows so each `(column,row)` is queried at most once. The flood boots from
   **non-emitted origin probes** — each clicked-block box's raw dilated footprint at
   its `collisionTopY` (with `HazardClass`) — then assigns initial depths via
@@ -523,9 +524,9 @@ index over the exact shell a candidate top `L` needs, per axis:
 - **XZ:** the `occluderColumns` window (expanded by the full width `2 · halfW`), so a
   wide entity's occluders one or two columns out still participate.
 
-Because gather calls `tops()` rather than re-deriving this shell, the window that once
-drifted (capping Y at the rim, XZ at `ceil(halfW)`) and re-exposed buried ledges as false
-`HOLE`s is gone. The **candidate** window on top of that shell is derived from the fall
+Gather calls `tops()` rather than re-deriving this shell, so ledges are exposed over the
+same window the flood uses; a narrower one (Y capped at the rim, XZ at `ceil(halfW)`)
+would re-expose buried ledges as false `HOLE`s. The **candidate** window on top of that shell is derived from the fall
 column itself — the rim column, the span's own columns, each widened by `ceil(halfW) + 1`
 for dilation — so it stays a function of the edge being classified rather than of however
 wide the classification region happens to be.
@@ -555,8 +556,9 @@ and [Solid hazards](#solid-hazards-soul-sand--magma)).
 row below the candidate top (`floor(L) - 1`), so collision that *lives in the block row
 below* `L` and rises into the standing column (vanilla walls/fences at height 1.5) still
 participates in burial. Those occluders-from-below keep burial complete for rising shapes.
-Motivating case: a lantern on a wall — under Ravager dilation the lantern body (wider than
-its cap) left a `7/16` ring with `fall = 0.0625` until the wall box below was in the shell.
+Example: a lantern on a wall. Under Ravager dilation the lantern body (wider than its
+cap) would leave a `7/16` ring with `fall = 0.0625`; the wall box below is in the shell
+and buries it.
 
 **Assumption:** one block row below the candidate top is enough — the occluding shapes
 that matter extend at most ~1.5 upward from their block Y, so they sit in

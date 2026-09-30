@@ -119,7 +119,7 @@ A test that only agrees with an incomplete fix is useless.
 - **Build gate:** `./gradlew build` must pass (compiles + runs `test` +
   `fabric.mod.json` schema processing). This only proves **logic + compile** —
   everything visual is runtime-only and gated in-game (see Stage-gating).
-- **Mappings gotcha:** Minecraft `26.2` ships **non-obfuscated**, so Loom rejects
+- **Mappings gotcha:** Minecraft `26.3` ships **non-obfuscated**, so Loom rejects
   an explicit `mappings` line — do **not** add `loom.officialMojangMappings()` (or
   any `mappings ...`) to `build.gradle`, or the build fails with "Cannot use Mojang
   mappings in a non-obfuscated environment".
@@ -169,8 +169,8 @@ These apply to **any** feature, so they live here rather than in a subsystem gui
   entrypoint, and put client code in the Loom `client` source set
   (`splitEnvironmentSourceSets()`). Holds for *any* feature, incl. a future
   settings screen.
-- **`26.2` ≠ `1.21.x`, and is a real release.** Since `1.21.11` Minecraft uses a
-  year-based `YY.major.minor` scheme; `26.2` is current — do **not** "correct" it
+- **`26.3` ≠ `1.21.x`, and is a real release.** Since `1.21.11` Minecraft uses a
+  year-based `YY.major.minor` scheme; `26.3` is current — do **not** "correct" it
   to the old scheme. Class/package/API names often differ from what you remember
   (e.g. `Identifier`, not `ResourceLocation`). **Do not trust training-data
   knowledge for this version** — it postdates most cutoffs and the rendering API

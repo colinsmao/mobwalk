@@ -10,7 +10,7 @@ General project facts live in `[project.md](project.md)`; rules in
 `[../AGENTS.md](../AGENTS.md)`. How overlays are *drawn* lives in
 `[rendering.md](rendering.md)`.
 
-> Version facts below target Minecraft `26.2` and MaLiLib `0.29.4`. Verify
+> Version facts below target Minecraft `26.3` and MaLiLib `0.30.2`. Verify
 > class names against the resolved jars when upgrading.
 
 
@@ -23,7 +23,7 @@ Pause → Mods (ModMenu) → Configure → GuiConfigs (MaLiLib GuiConfigsBase)
   → also Configs.saveToDisk() on ClientPlayConnectionEvents.DISCONNECT
 ```
 
-- **MaLiLib** `0.29.4` (`fi.dy.masa.malilib.`*) is the settings UI and JSON
+- **MaLiLib** `0.30.2` (`fi.dy.masa.malilib.`*) is the settings UI and JSON
 persistence stack. Loom uses plain `implementation` (non-remapping); ModMenu is
 `compileOnly` + `localRuntime` so Configure appears in `runClient` without
 bundling ModMenu into the jar.
@@ -254,9 +254,9 @@ Match the existing Generic / Debug pattern in `Configs.java`:
 New categories: add another nested class + OPTIONS list, another JSON category
 string in load/save, and a matching filter tab in `GuiConfigs`.
 
-## MaLiLib config types (0.28.x)
+## MaLiLib config types
 
-From MaLiLib’s `ConfigType` enum for this line. Use these classes under
+From MaLiLib’s `ConfigType` enum. Use these classes under
 `fi.dy.masa.malilib.config.options` (and `…options.table` for tables).
 
 ### Scalars
