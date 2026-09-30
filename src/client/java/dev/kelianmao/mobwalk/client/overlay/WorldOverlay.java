@@ -11,7 +11,7 @@ import net.fabricmc.fabric.api.client.rendering.v1.level.LevelExtractionContext;
 /**
  * A drawable element rendered in the world (not the HUD).
  *
- * <p>Rendering in {@code 26.2} is split into an "extraction" phase (gather
+ * <p>Rendering in {@code 26.3} is split into an "extraction" phase (gather
  * immutable, thread-safe state) and a "drawing" phase (emit geometry). Widgets
  * read mutable game state in {@link #extract} and stash whatever they need,
  * then emit vertices in {@link #emit}. {@link WorldOverlayManager} owns the

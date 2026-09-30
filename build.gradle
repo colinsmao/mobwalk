@@ -20,7 +20,7 @@ repositories {
     content { includeGroupAndSubgroups("me.fallenbreath") }
   }
   // ModMenu jars on terraformersmc.com have been truncating mid-download;
-  // Modrinth mirrors the same 20.0.1 artifact reliably.
+  // Modrinth mirrors the same 21.0.0 artifact reliably.
   maven { url = "https://api.modrinth.com/maven" }
 }
 
@@ -46,7 +46,7 @@ dependencies {
   implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
 
   // MaLiLib (settings screen + config options). Plain implementation — this loom
-  // uses official 26.2 mappings (non-remapping), same as fabric-api above.
+  // uses official 26.3 mappings (non-remapping), same as fabric-api above.
   implementation "fi.dy.masa.malilib:malilib-fabric-${project.minecraft_version}:${project.malilib_version}"
 
   // ModMenu (Configure button). compileOnly for the API; localRuntime so

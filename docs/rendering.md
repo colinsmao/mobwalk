@@ -7,7 +7,7 @@ guidance (versions, build/run, conventions, git) lives in
 source files. This doc captures the subsystem design and the API facts that the
 compiler and stale training data won't hand you.
 
-> All version-specific facts below are for Minecraft `26.2`. The rendering API
+> All version-specific facts below are for Minecraft `26.3`. The rendering API
 > churns hard between releases, so **verify class/package names against the
 > resolved jars and live docs** (<https://docs.fabricmc.net/develop>,
 > <https://maven.fabricmc.net/docs>), not memory.
@@ -34,7 +34,7 @@ Config UI, persistence, and MaLiLib option types live in
   `attachElementBefore(VanillaHudElements.CHAT, id, element)`) so the overlay
   inherits that element's render condition (respects the F1 "hide HUD" toggle).
   `addFirst`/`addLast` do not inherit one.
-- The `HudElement` functional method in `26.2` is
+- The `HudElement` functional method in `26.3` is
   `extractRenderState(GuiGraphicsExtractor, DeltaTracker)` (attached as
   `OverlayManager::render`).
 - **Framework:** `Overlay` is a small interface (`id()`,
@@ -67,18 +67,24 @@ Config UI, persistence, and MaLiLib option types live in
 
 - Rendering is split into an **extraction** phase (read game state into an
   immutable snapshot) and a **drawing** phase (emit geometry). Register
-  `LevelRenderEvents.END_EXTRACTION` and
-  `LevelRenderEvents.AFTER_TRANSLUCENT_TERRAIN`. The drawing context is
+  `LevelExtractionEvents.END_EXTRACTION` and
+  `LevelRenderEvents.END_MAIN`. The drawing context is
   `LevelRenderContext` (`poseStack()`, `levelState().cameraRenderState.pos`).
-- **Draw after translucent terrain — ice/glass/honey composite under the fill.**
-  Translucent block bodies are already in the color buffer; the overlay then
-  blends on top at full authored alpha (`FILL_ALPHA` etc.), with SKIRT on
-  `DEBUG_FILLED_SNIPPET` depth state (LEQUAL, `writeDepth=false`) so opaque
-  terrain still occludes. Water also writes depth in that translucent pass, so a
-  pond bottom in the depth-tested SKIRT layer is hidden until crouch (depth-off
-  `FILLED`). **Decision recorded:** prefer this single AFTER pass over (a)
-  `BEFORE_TRANSLUCENT_TERRAIN` alone (ice/honey overdraw the fill) and (b)
-  dual BEFORE+AFTER with scaled alpha (≈2× emit/upload/draw cost; fills read too
+- **Draw at `END_MAIN`, after vanilla closes its main render pass.** The 26.3
+  command encoder holds one open pass at a time, and the terrain callbacks
+  (`AFTER_TRANSLUCENT_TERRAIN` etc.) run inside vanilla's pass, so the overlay
+  opens its own pass only once that one is submitted. `END_MAIN` fires on both
+  the classic and the Improved Transparency paths.
+- **Ice/glass/honey composite under the fill.** Translucent block bodies are
+  already in the color buffer; the overlay then blends on top at full authored
+  alpha (`FILL_ALPHA` etc.), with SKIRT on `DEBUG_FILLED_SNIPPET` depth state
+  (LEQUAL, `writeDepth=false`) so opaque terrain still occludes. Water also
+  writes depth in the translucent pass, so a pond bottom in the depth-tested
+  SKIRT layer is hidden until crouch (depth-off `FILLED`). Weather, clouds, the
+  world border, and entity outlines are drawn before the overlay, so the paint
+  sits over them. **Decision recorded:** a single late draw over (a) drawing
+  before translucent terrain (ice/honey overdraw the fill) and (b) dual
+  before+after with scaled alpha (≈2× emit/upload/draw cost; fills read too
   faint). Through-water without crouch is the lower-priority case.
   - **Honey looks odd (two height layers).** Honey collides as an inset box topped
     at `15/16` and renders/outlines as a full-height translucent body. With
@@ -88,7 +94,7 @@ Config UI, persistence, and MaLiLib option types live in
     [`geometry.md`](geometry.md). Left as-is.
   - **Vanilla crosshair block outline.** With a selection drawn, the targeted-block
     highlight can look like a translucent box (vanilla outline compositing over our
-    half-alpha fill / after-translucent phase). Cosmetic only; fixing it would mean
+    half-alpha fill). Cosmetic only; fixing it would mean
     suppressing or re-timing vanilla's outline when the overlay is up — deferred
     unless it becomes a priority.
 - **No high-level path** for arbitrary geometry: build a `BufferBuilder` and
@@ -116,8 +122,10 @@ Config UI, persistence, and MaLiLib option types live in
   and a **depth-off `BEAM`** layer (beams when `showBeamsThroughWalls` is on,
   drawn last so opaque beams cover skirts; when off, beams share `SKIRT`),
   so `emit(matrix, fillBuffer, skirtBuffer)` writes into both and each layer
-  batches into one draw call — the `MeshData` → `MappableRingBuffer` →
-  render-pass GPU handoff (per layer), the use-key rising-edge dispatch, the
+  batches into one draw call — the `MeshData` → `MappableRingBuffer` upload,
+  one shared render pass with a `setPipeline` per layer, then the ring-buffer
+  `rotate()` once that pass is closed (`rotate()` creates a fence, which the
+  encoder rejects while any pass is open), the use-key rising-edge dispatch, the
   per-tick `onClientTick` dispatch after it, and GPU
   cleanup on
   `ClientLifecycleEvents.CLIENT_STOPPING` (chosen over a `GameRenderer#close`
@@ -379,7 +387,7 @@ the published snapshot into `SurfaceEmitter.emit`.
   `CollisionSurfaceOverlay` publishes a `volatile` hazard list beside holes;
   `SurfaceEmitter.emitBeams` draws both lists via `emitBeam`.
 
-## `26.2` rendering API names (verified against the resolved jars)
+## `26.3` rendering API names (verified against the resolved jars)
 
 - Draw context is **`net.minecraft.client.gui.GuiGraphicsExtractor`**. Text is
   drawn with **`text(Font, String, x, y, color, dropShadow)`**. Identifiers are
@@ -387,12 +395,26 @@ the published snapshot into `SurfaceEmitter.emit`.
   `Identifier.fromNamespaceAndPath(...)`.
 - The current screen lives on **`Minecraft.getInstance().gui.screen()`** (set
   via `gui.setScreen(...)`).
+- GPU types live in **`com.mojang.renderpearl`**: `RenderPipeline`,
+  `CompiledRenderPipeline`, `PrimitiveTopology`, and `IndexType` under
+  `api.pipeline`; `GpuBuffer` and `GpuBufferSlice` under `api.buffers`;
+  `RenderPass` under `api.commands`; `VertexFormat` under `api.vertex`.
+  `BufferBuilder`, `ByteBufferBuilder`, `MeshData`, and `PoseStack` are in
+  `com.mojang.blaze3d.vertex`. `RenderSystem` is in `com.mojang.blaze3d.systems`.
 - Custom filled pipelines start from **`RenderPipelines.DEBUG_FILLED_SNIPPET`**.
   Topology is **`PrimitiveTopology.QUADS`**; the vertex format is
-  **`pipeline.getVertexFormatBinding(0)`**. **`RenderPass.drawIndexed`** is
+  **`pipeline.getVertexFormatBinding(0)`**. **`RenderPass.setPipeline`** takes a
+  **`CompiledRenderPipeline`** from **`RenderSystem.getCompiledPipeline`**.
+  **`RenderPass.drawIndexed`** is
   `(indexCount, instanceCount, firstIndex, baseVertex, firstInstance)`. Vertex
-  uploads map through **`GpuBufferSlice.map`**. The color/depth target is
-  **`client.gameRenderer.mainRenderTarget()`**.
+  uploads map through **`GpuBufferSlice.map`**. Dynamic transforms come from
+  **`RenderSystem.getDynamicUniforms()`** (`DynamicGpuData.writeTransform`).
+  The color/depth target is **`client.gameRenderer.mainRenderTarget()`**.
+- Level extraction registers on **`LevelExtractionEvents.END_EXTRACTION`**.
+  The draw registers on **`LevelRenderEvents.END_MAIN`**. Fill, skirt, and
+  beam layers share one `RenderPass`, switching pipeline between draws.
+- A client arm swing is **`LivingEntity.swing(InteractionHand, SwingAnimation, boolean)`**.
+  The wand uses `SwingAnimation.DEFAULT`.
 
 ## Where the file-specific gotchas live (inline comments)
 
@@ -464,8 +486,8 @@ the published snapshot into `SurfaceEmitter.emit`.
   no occluder subtract; published as `BeamSpan` with `WATER` / `LAVA` / `SOUL_SAND` /
   `MAGMA`).
 - `WorldOverlayManager.java`: three-layer setup (depth-off `FILLED` tops,
-  depth-on `SKIRT`, depth-off `BEAM` last), single draw at `AFTER_TRANSLUCENT_TERRAIN` (ice/honey
+  depth-on `SKIRT`, depth-off `BEAM` last), single draw at `END_MAIN` (ice/honey
   composite; pond bottoms via crouch — see the translucent-phase decision),
-  per-layer buffer/GPU handoff, the through-walls debug aid, the
+  one shared render pass and rotate-after-close, the through-walls debug aid, the
   `CLIENT_STOPPING`-vs-mixin GPU-cleanup trade-off, the camera-relative
   translate, and the use-key-edge-vs-`UseItemCallback` debounce.
